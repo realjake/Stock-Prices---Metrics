@@ -20,18 +20,15 @@ with open("dev/config.yaml") as file:
     worksheet_name = config.get("worksheet_name")
     sheet_name = config.get("sheet_name")
     refresh_rate_open = 30  # 30 seconds when market is open
-    refresh_rate_closed = 300  # 30 minutes when market is closed
+    refresh_rate_closed = 1800  # 30 minutes when market is closed
+    refresh_multiplier = 10  # Multiplier for reloading tickers
 
 # Authenticate and connect to Google Sheets
 gc = gspread.service_account(filename='dev/credentials.json')
 sheet = gc.open(worksheet_name).worksheet(sheet_name)
 
-# Load data from Google Sheet to DataFrame
-df = pd.DataFrame(sheet.get_all_values()[1:], columns=sheet.get_all_values()[0])
-tickers = df["tickers"].dropna().tolist()
-
 # Define U.S. stock market hours in Eastern Time
-MARKET_OPEN_HOUR = 8
+MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MINUTE = 30
 MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MINUTE = 0
@@ -45,6 +42,13 @@ def is_market_open():
     market_open = now.replace(hour=MARKET_OPEN_HOUR, minute=MARKET_OPEN_MINUTE, second=0, microsecond=0)
     market_close = now.replace(hour=MARKET_CLOSE_HOUR, minute=MARKET_CLOSE_MINUTE, second=0, microsecond=0)
     return market_open <= now <= market_close and now.weekday() < 5  # Market open only on weekdays
+
+# Function to load tickers from Google Sheets
+def load_tickers():
+    df = pd.DataFrame(sheet.get_all_values()[1:], columns=sheet.get_all_values()[0])
+    tickers = df["tickers"].dropna().tolist()
+    logging.info(f"Loaded {len(tickers)} tickers from Google Sheets.")
+    return tickers
 
 # API request function
 def fmp_request(
@@ -69,7 +73,7 @@ def fmp_request(
     return data
 
 # Fetch and store financial data concurrently
-def fmp_data():
+def fmp_data(tickers):
     endpoints = {'real-time-quote': ('stock/full/real-time-price/', None, 'v3'), 'quote': ('quote', None, 'v3'), 'postpre': ('pre-post-market/', None, 'v4')}
     financial_data = {symbol: {} for symbol in tickers}
     max_workers = min(50, len(tickers) * len(endpoints))
@@ -96,7 +100,7 @@ def fmp_data():
     return financial_data
 
 # Update Google Sheet with financial data using a single batch update
-def google_update(financial_data):
+def google_update(financial_data, df):
     try:
         updates = []
         tickers_start_row = df.index[df["tickers"].notnull()][0] + 2
@@ -125,16 +129,26 @@ def google_update(financial_data):
         logging.error(f"Failed to update Google Sheet: {e}")
 
 def main():
+    tickers = load_tickers()
+    loop_counter = 0
+    refresh_threshold_open = 10 * refresh_rate_open
+    refresh_threshold_closed = 10 * refresh_rate_closed
+    
     while True:
-        if is_market_open():
-            start_time = time.time()
-            financial_data = fmp_data()
-            google_update(financial_data)
-            logging.info(f"Program completed in {time.time() - start_time:.2f} seconds.")
-            time.sleep(refresh_rate_open)  # 30 seconds when market is open
-        else:
-            logging.info("Market is closed. Waiting for it to open...")
-            time.sleep(refresh_rate_closed)  # 30 minutes when market is closed
+        refresh_rate = refresh_rate_open if is_market_open() else refresh_rate_closed
+        threshold = refresh_threshold_open if is_market_open() else refresh_threshold_closed
+
+        if loop_counter >= threshold:
+            tickers = load_tickers()  # Reload tickers every 10x refresh rate
+            loop_counter = 0  # Reset counter after refreshing tickers
+
+        start_time = time.time()
+        financial_data = fmp_data(tickers)
+        google_update(financial_data, pd.DataFrame(sheet.get_all_values()[1:], columns=sheet.get_all_values()[0]))
+        logging.info(f"Program completed in {time.time() - start_time:.2f} seconds.")
+        
+        loop_counter += refresh_rate  # Increment counter by refresh interval
+        time.sleep(refresh_rate)
 
 if __name__ == "__main__":
     main()
