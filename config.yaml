@@ -1,0 +1,6 @@
+api_key: 
+refresh_rate: 60  # in seconds
+rate_limit: 3000 # per minute
+logging: true
+worksheet_name: 
+sheet_name:
